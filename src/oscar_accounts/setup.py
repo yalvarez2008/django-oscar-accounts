@@ -1,3 +1,4 @@
+from django.db import IntegrityError
 from oscar.core.loading import get_model
 
 
@@ -6,6 +7,7 @@ def create_default_accounts():
     from oscar_accounts import names
 
     AccountType = get_model("oscar_accounts", "AccountType")
+    Account = get_model("oscar_accounts", "Account")
 
     def get_or_add_root(name: str):
         node = AccountType.get_root_nodes().filter(name=name).first()
@@ -15,21 +17,36 @@ def create_default_accounts():
         node = parent.get_children().filter(name=name).first()
         return node or parent.add_child(name=name)
 
-    def get_or_create_account(account_type_node, name: str, **defaults):
-        # Related manager soporta get_or_create
-        obj, created = account_type_node.accounts.get_or_create(
-            name=name,
-            defaults=defaults or None,
-        )
-        # Opcional: si ya existía, “sincroniza” defaults (ej: credit_limit=None)
-        if (not created) and defaults:
-            changed = False
-            for k, v in defaults.items():
-                if getattr(obj, k) != v:
-                    setattr(obj, k, v)
-                    changed = True
-            if changed:
-                obj.save(update_fields=list(defaults.keys()))
+    def get_or_create_account(account_type_node, name: str, credit_limit=None):
+        """
+        Account.name es UNIQUE global, así que NO podemos usar:
+            account_type_node.accounts.get_or_create(name=...)
+        porque si existe con otro account_type, falla con IntegrityError.
+
+        Esta función crea o reutiliza por name, y asegura account_type correcto.
+        """
+        try:
+            obj, created = Account.objects.get_or_create(
+                name=name,
+                defaults={
+                    "account_type": account_type_node,
+                    "credit_limit": credit_limit,
+                },
+            )
+        except IntegrityError:
+            # ya existe por el UNIQUE(name) pero en otro account_type
+            obj = Account.objects.get(name=name)
+            created = False
+
+        if obj.account_type_id != account_type_node.pk:
+            obj.account_type = account_type_node
+            obj.save(update_fields=["account_type"])
+
+        # si quieres también “arreglar” credit_limit cuando sea None:
+        if credit_limit is None and obj.credit_limit is not None:
+            obj.credit_limit = None
+            obj.save(update_fields=["credit_limit"])
+
         return obj
 
     # ---------- Assets tree ----------
@@ -49,6 +66,5 @@ def create_default_accounts():
     # ---------- Liabilities tree ----------
     liabilities = get_or_add_root(names.LIABILITIES)
     income = get_or_add_child(liabilities, names.DEFERRED_INCOME)
-
     for nm in names.DEFERRED_INCOME_ACCOUNT_TYPES:
         get_or_add_child(income, nm)
