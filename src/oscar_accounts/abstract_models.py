@@ -145,14 +145,33 @@ class Account(models.Model):
     def save(self, *args, **kwargs):
         if self.code:
             self.code = self.code.upper()
-        # Ensure the balance is always correct when saving
+
+        # Si es nuevo, NO intentes leer self.transactions
+        if self.pk is None:
+            # En inserts, update_fields puede molestar → quítalo
+            kwargs.pop("update_fields", None)
+            return super().save(*args, **kwargs)
+
+        # Ya existe → podemos recalcular balance
         self.balance = self._balance()
+
+        # Si vino update_fields, asegúrate de incluir balance (y code si aplica)
+        if kwargs.get("update_fields") is not None:
+            uf = set(kwargs["update_fields"])
+            uf.add("balance")
+            if self.code:
+                uf.add("code")
+            kwargs["update_fields"] = uf
+
         return super().save(*args, **kwargs)
 
     def _balance(self):
-        aggregates = self.transactions.aggregate(sum=Sum('amount'))
-        sum = aggregates['sum']
-        return D('0.00') if sum is None else sum
+        if self.pk is None:
+            return D("0.00")
+        aggregates = self.transactions.aggregate(total=Sum("amount"))
+        return aggregates["total"] or D("0.00")
+
+
 
     def num_transactions(self):
         return self.transactions.all().count()
